@@ -8,6 +8,8 @@ from r2n2_custom import R2N2
 from pytorch3d.ops import sample_points_from_meshes
 from pytorch3d.structures import Meshes
 import dataset_location
+from pytorch3d.io import IO
+from configs import OUTPUT_DIR_1
 import torch
 
 
@@ -32,6 +34,7 @@ def fit_mesh(mesh_src, mesh_tgt, args):
 
     deform_vertices_src = torch.zeros(mesh_src.verts_packed().shape, requires_grad=True, device='cuda')
     optimizer = torch.optim.Adam([deform_vertices_src], lr = args.lr)
+    converge_steps = None
     print("Starting training !")
     for step in range(start_iter, args.max_iter):
         iter_start_time = time.time()
@@ -54,18 +57,28 @@ def fit_mesh(mesh_src, mesh_tgt, args):
         iter_time = time.time() - iter_start_time
 
         loss_vis = loss.cpu().item()
-
+        if converge_steps == None and loss_vis <= 1e-10:
+            converge_steps = step
         print("[%4d/%4d]; ttime: %.0f (%.2f); loss: %.3f" % (step, args.max_iter, total_time,  iter_time, loss_vis))        
     
+    
     mesh_src.offset_verts_(deform_vertices_src)
-
-    print('Done!')
+    
+    save_dict = {
+        'src': mesh_src,
+        'tgt': mesh_tgt,
+        'converge_steps': converge_steps
+    }
+    save_file_path = f"{OUTPUT_DIR_1}/fitted_meshes.pth"
+    torch.save(save_dict, save_file_path)
+    print(f'Done! Saved at {save_file_path}, with converge steps={converge_steps}')
 
 
 def fit_pointcloud(pointclouds_src, pointclouds_tgt, args):
     start_iter = 0
     start_time = time.time()    
     optimizer = torch.optim.Adam([pointclouds_src], lr = args.lr)
+    converge_steps = None
     for step in range(start_iter, args.max_iter):
         iter_start_time = time.time()
 
@@ -79,16 +92,26 @@ def fit_pointcloud(pointclouds_src, pointclouds_tgt, args):
         iter_time = time.time() - iter_start_time
 
         loss_vis = loss.cpu().item()
+        if converge_steps == None and loss_vis <= 1e-10:
+            converge_steps = step
 
         print("[%4d/%4d]; ttime: %.0f (%.2f); loss: %.3f" % (step, args.max_iter, total_time,  iter_time, loss_vis))
     
-    print('Done!')
+    save_dict = {
+        'src': pointclouds_src,
+        'tgt': pointclouds_tgt,
+        'converge_steps': converge_steps
+    }
+    save_file_path = f"{OUTPUT_DIR_1}/fitted_pointcloud.pth"
+    torch.save(save_dict, save_file_path)
+    print(f'Done! Saved at {save_file_path}, with converge steps={converge_steps}')
 
 
 def fit_voxel(voxels_src, voxels_tgt, args):
     start_iter = 0
     start_time = time.time()    
     optimizer = torch.optim.Adam([voxels_src], lr = args.lr)
+    converge_steps = None
     for step in range(start_iter, args.max_iter):
         iter_start_time = time.time()
 
@@ -102,10 +125,19 @@ def fit_voxel(voxels_src, voxels_tgt, args):
         iter_time = time.time() - iter_start_time
 
         loss_vis = loss.cpu().item()
+        if converge_steps == None and loss_vis <= 1e-10:
+            converge_steps = step
 
         print("[%4d/%4d]; ttime: %.0f (%.2f); loss: %.3f" % (step, args.max_iter, total_time,  iter_time, loss_vis))
     
-    print('Done!')
+    save_dict = {
+        'src': voxels_src,
+        'tgt': voxels_tgt,
+        'converge_steps': converge_steps
+    }
+    save_file_path = f"{OUTPUT_DIR_1}/fitted_voxels.pth"
+    torch.save(save_dict, save_file_path)
+    print(f'Done! Saved at {save_file_path}, with converge steps={converge_steps}')
 
 
 def train_model(args):

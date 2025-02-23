@@ -1,0 +1,6 @@
+data
+__pycache__
+wandb
+output
+output/checkpoints
+vis

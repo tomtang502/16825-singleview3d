@@ -14,11 +14,12 @@ import matplotlib.pyplot as plt
 from pytorch3d.transforms import Rotate, axis_angle_to_matrix
 import math
 import numpy as np
+from viz import render_voxel_by_mesh, mesh_view360_gif, pc_view360_gif
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Singleto3D', add_help=False)
     parser.add_argument('--arch', default='resnet18', type=str)
-    parser.add_argument('--vis_freq', default=1000, type=int)
+    parser.add_argument('--vis_freq', default=50, type=int)
     parser.add_argument('--batch_size', default=1, type=int)
     parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--type', default='vox', choices=['vox', 'point', 'mesh'], type=str)
@@ -26,6 +27,7 @@ def get_args_parser():
     parser.add_argument('--w_chamfer', default=1.0, type=float)
     parser.add_argument('--w_smooth', default=0.1, type=float)  
     parser.add_argument('--load_checkpoint', action='store_true')  
+    parser.add_argument('--digest', action='store_true')
     parser.add_argument('--device', default='cuda', type=str) 
     parser.add_argument('--load_feat', action='store_true') 
     return parser
@@ -143,10 +145,29 @@ def evaluate_model(args):
     avg_r_score = []
 
     if args.load_checkpoint:
-        checkpoint = torch.load(f'checkpoint_{args.type}.pth')
+        ckpt_path = {
+            'vox': "output/checkpoints/checkpoint_vox_49999.pth",
+            'point': "output/checkpoints/checkpoint_full_point_8000.pth",
+            'mesh': "output/checkpoints/checkpoint_mesh_42000.pth"
+        }
+        checkpoint = torch.load(ckpt_path[args.type])
         model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"Succesfully loaded iter {start_iter}")
-    
+        print(f"Succesfully loaded iter {start_iter} from ckpt {ckpt_path[args.type]}")
+    if args.digest and args.type == 'point':
+        print("digesting model by register hooks")
+        intermediate_outputs = dict()
+        def get_hook(layer_name):
+            def hook_fn(module, input, output):
+                intermediate_outputs[layer_name] = output
+            return hook_fn
+        model.dconv0.register_forward_hook(get_hook("dconv0"))
+        model.decoder_conv2d_relu_1.register_forward_hook(get_hook("decoder_conv2d_relu_1"))
+        model.decoder_conv2d_relu_2.register_forward_hook(get_hook("decoder_conv2d_relu_2"))
+        model.dconv_relu[1].register_forward_hook(get_hook("dconv_relu_1"))
+        model.dconv_relu[3].register_forward_hook(get_hook("dconv_relu_3"))
+        model.dconv_relu.register_forward_hook(get_hook("xyz_res"))
+
+        
     print("Starting evaluating !")
     max_iter = len(eval_loader)
     for step in range(start_iter, max_iter):
@@ -157,18 +178,45 @@ def evaluate_model(args):
         feed_dict = next(eval_loader)
 
         images_gt, mesh_gt = preprocess(feed_dict, args)
+        images_gt_o = images_gt.clone().cpu().squeeze(0).numpy()
 
         read_time = time.time() - read_start_time
 
         predictions = model(images_gt, args)
-
-        metrics = evaluate(predictions, mesh_gt, thresholds, args)
+        if args.type == 'vox':
+            try:
+                metrics = evaluate(predictions.unsqueeze(1), mesh_gt, thresholds, args)
+            except ValueError as e:
+                if str(e) == "Meshes are empty.":
+                    # Skip the current iteration if the error matches
+                    continue
+        else:
+            metrics = evaluate(predictions, mesh_gt, thresholds, args)
+        
 
         # TODO:
-        # if (step % args.vis_freq) == 0:
-        #     # visualization block
-        #     #  rend = 
-        #     plt.imsave(f'vis/{step}_{args.type}.png', rend)
+        if (step % args.vis_freq) == 0:
+            if args.type == 'vox':
+                plt.imsave(f'vis/{step}_{args.type}_input.png', images_gt_o)
+                render_voxel_by_mesh(predictions.detach().cpu(), args.device, save_path=f'vis/{step}_{args.type}.gif', image_size=(480, 640), norm_size=0.5, dist=2.9)
+                mesh_view360_gif(mesh_gt.to('cuda'), f'vis/{step}_{args.type}_gt.gif', args.device, add_texture=True, dist=1.5)
+            elif args.type == 'point':
+                if args.digest:
+                    torch.save(intermediate_outputs, f'writeup_assets/2/2.6/{step}_{args.type}_dig.pt')
+                else:
+                    plt.imsave(f'vis/{step}_{args.type}_input.png', images_gt_o)
+                    pc_view360_gif(predictions, f'vis/{step}_{args.type}.gif', args.device)
+                    pc_gt = sample_points_from_meshes(mesh_gt, args.n_points)
+                    pc_view360_gif(pc_gt, f'vis/{step}_{args.type}_gt.gif', args.device)
+            elif args.type == 'mesh':
+                plt.imsave(f'vis/{step}_{args.type}_input.png', images_gt_o)
+                mesh_view360_gif(predictions.to('cuda'), f'vis/{step}_{args.type}.gif', args.device, add_texture=True)
+                mesh_view360_gif(mesh_gt.to('cuda'), f'vis/{step}_{args.type}_gt.gif', args.device, add_texture=True)
+            # visualization block
+            #  rend = 
+            # render_voxel_by_mesh(predictions, args.device, f'vis/{step}_{args.type}.gif', image_size=(480, 640))
+            # render_voxel_by_mesh(mesh_gt, args.device, 'vis/{step}_{args.type}.gif', image_size=(480, 640))
+            # plt.imsave(f'vis/{step}_{args.type}.png', rend)
       
 
         total_time = time.time() - start_time
@@ -184,8 +232,8 @@ def evaluate_model(args):
     
 
     avg_f1_score = torch.stack(avg_f1_score).mean(0)
-
-    save_plot(thresholds, avg_f1_score,  args)
+    if not args.digest:
+        save_plot(thresholds, avg_f1_score,  args)
     print('Done!')
 
 if __name__ == '__main__':

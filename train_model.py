@@ -3,12 +3,15 @@ import time
 
 import dataset_location
 import losses
-import torch
+import torch, wandb
 from model import SingleViewto3D
 from pytorch3d.datasets.r2n2.utils import collate_batched_R2N2
 from pytorch3d.ops import sample_points_from_meshes
 from r2n2_custom import R2N2
+from configs import CKPT_DIR
+from tqdm import tqdm
 
+do_wandb=True
 
 def get_args_parser():
     parser = argparse.ArgumentParser("Singleto3D", add_help=False)
@@ -27,7 +30,7 @@ def get_args_parser():
     parser.add_argument("--save_freq", default=2000, type=int)
     parser.add_argument("--load_checkpoint", action="store_true")
     parser.add_argument('--device', default='cuda', type=str) 
-    parser.add_argument('--load_feat', action='store_true') 
+    parser.add_argument('--load_feat', action='store_true')
     return parser
 
 
@@ -66,6 +69,7 @@ def calculate_loss(predictions, ground_truth, args):
 
 
 def train_model(args):
+    print(dataset_location.SPLITS_PATH)
     r2n2_dataset = R2N2(
         "train",
         dataset_location.SHAPENET_PATH,
@@ -85,7 +89,6 @@ def train_model(args):
         shuffle=True,
     )
     train_loader = iter(loader)
-
     model = SingleViewto3D(args)
     model.to(args.device)
     model.train()
@@ -96,14 +99,18 @@ def train_model(args):
     start_time = time.time()
 
     if args.load_checkpoint:
-        checkpoint = torch.load(f"checkpoint_{args.type}.pth")
+        ckpt_path = {
+            'vox': "output/checkpoints/checkpoint_vox_8000.pth",
+            'point': "output/checkpoints/checkpoint_point_8000.pth"
+        }
+        checkpoint = torch.load(ckpt_path[args.type])
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_iter = checkpoint["step"]
         print(f"Succesfully loaded iter {start_iter}")
 
     print("Starting training !")
-    for step in range(start_iter, args.max_iter):
+    for step in tqdm(range(start_iter, args.max_iter)):
         iter_start_time = time.time()
 
         if step % len(train_loader) == 0:  # restart after one epoch
@@ -117,7 +124,8 @@ def train_model(args):
         read_time = time.time() - read_start_time
 
         prediction_3d = model(images_gt, args)
-
+        if args.type != "mesh":
+            ground_truth_3d = ground_truth_3d.squeeze(1)
         loss = calculate_loss(prediction_3d, ground_truth_3d, args)
 
         optimizer.zero_grad()
@@ -129,7 +137,7 @@ def train_model(args):
 
         loss_vis = loss.cpu().item()
 
-        if (step % args.save_freq) == 0 and step > 0:
+        if ((step % args.save_freq) == 0 or step == (args.max_iter-1)) and step > 0:
             print(f"Saving checkpoint at step {step}")
             torch.save(
                 {
@@ -137,18 +145,42 @@ def train_model(args):
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                 },
-                f"checkpoint_{args.type}.pth",
+                f"{CKPT_DIR}/checkpoint_c_{args.type}_{step}.pth",
             )
 
-        print(
-            "[%4d/%4d]; ttime: %.0f (%.2f, %.2f); loss: %.3f"
-            % (step, args.max_iter, total_time, read_time, iter_time, loss_vis)
-        )
-
+        
+        if do_wandb:
+            wandb.log({"ttime": total_time, "read_time": read_time, "iter_time": iter_time, "loss": loss_vis})
+        else:
+            print(
+                "[%4d/%4d]; ttime: %.0f (%.2f, %.2f); loss: %.3f"
+                % (step, args.max_iter, total_time, read_time, iter_time, loss_vis)
+            )
     print("Done!")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Singleto3D", parents=[get_args_parser()])
     args = parser.parse_args()
+    if do_wandb:
+        wandb.init(
+            # set the wandb project where this run will be logged
+            project="825",
+
+            # track hyperparameters and run metadata
+            config={
+                "type": args.type,
+                "learning_rate": args.lr,
+                "enc_arch": args.arch,
+                "dec_arch": "Pix2Vox",
+                "dataset": "R2N2_chair",
+                "epochs": args.max_iter,
+                "batch_size": args.batch_size,
+                "num_workers": args.num_workers,
+                "device": args.device,
+                "load_feat": args.load_feat,
+                "n_points": args.n_points,
+                "FULL_DATASET": dataset_location.use_full_dataset
+            }
+        )
     train_model(args)
